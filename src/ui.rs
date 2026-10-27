@@ -671,37 +671,24 @@ impl FamilyList {
     fn entries(&self) -> Vec<usize> {
         self.core.model.borrow().visible(&self.core.search.value())
     }
-    fn row(&self, index: usize, theme: &Theme) -> Button {
+    fn row(&self, index: usize, position: usize, count: usize) -> ListRow {
         let model = self.core.model.borrow();
         let family = &model.families[index];
         let selected = model.selected.as_ref() == Some(&family.name);
-        self.core
-            .button("", Action::Family(family.name.clone()))
-            .accessibility_role(AccessibilityRole::ListItem)
-            .accessibility_selected(selected)
-            .accessibility_label(format!("{}, {} styles", family.name, family.faces.len()))
-            .style(ButtonStyle::Custom {
-                background: if selected {
-                    theme.list.selected_background
-                } else {
-                    Color::TRANSPARENT
-                },
-                hovered_background: theme.list.hovered_background,
-                border: Color::TRANSPARENT,
-                hovered_border: Color::TRANSPARENT,
-                foreground: theme.list.foreground,
-            })
-            .alignment(ZStackAlignment::Leading)
-            .content(
-                VStack::new()
-                    .alignment(StackAlignment::Stretch)
-                    .gap(StackGap::None)
-                    .child(Text::label(&family.name))
-                    .child(
-                        Text::caption(format!("{} styles", family.faces.len()))
-                            .color(theme.colors.text_secondary),
-                    ),
-            )
+        let action = Action::Family(family.name.clone());
+        let interaction = self
+            .core
+            .buttons
+            .borrow_mut()
+            .entry(action.clone())
+            .or_default()
+            .clone();
+        let pending = self.core.pending.clone();
+        ListRow::with_interaction(interaction, &family.name)
+            .subtitle(format!("{} styles", family.faces.len()))
+            .selected(selected)
+            .adjacent_rows(position > 0, position + 1 < count)
+            .on_select(move || pending.set(Some(action.clone())))
     }
 }
 impl View for FamilyList {
@@ -738,13 +725,14 @@ impl View for FamilyList {
                 ROW - 2.0,
             );
             if bounds.intersection(self.viewport).is_some() {
-                self.row(*index, c.theme).paint(bounds, c);
+                self.row(*index, row, entries.len()).paint(bounds, c);
             }
         }
     }
     fn handle_event(&self, b: Rect, e: &ViewEvent, c: &mut EventContext<'_>) -> EventResult {
         let mut result = EventResult::Ignored;
-        for (row, index) in self.entries().iter().enumerate() {
+        let entries = self.entries();
+        for (row, index) in entries.iter().enumerate() {
             let bounds = rect(
                 b.origin.x + 8.0,
                 b.origin.y + row as f32 * ROW,
@@ -752,7 +740,10 @@ impl View for FamilyList {
                 ROW - 2.0,
             );
             if bounds.intersection(self.viewport).is_some() {
-                result = result.merge(self.row(*index, c.theme()).handle_event(bounds, e, c));
+                result = result.merge(
+                    self.row(*index, row, entries.len())
+                        .handle_event(bounds, e, c),
+                );
             }
         }
         result
@@ -1006,7 +997,7 @@ impl View for Specimen {
 mod tests {
     use super::*;
     use appcore::viewkit::draw_command::{DisplayList, DrawCommand};
-    use appcore::viewkit::typography::TextMeasurer;
+    use appcore::viewkit::typography::{TextMeasurer, Typography};
     fn fixture() -> FontsView {
         let root = PathBuf::from(
             std::env::var_os("MOCHIOS_PREVIEW_FONTS_SYSTEM").expect("test font directory"),
@@ -1020,6 +1011,99 @@ mod tests {
         model.update(fonts::catalogue(&locations), "Inter", None);
         FontsView::with_model(model, locations)
     }
+    #[test]
+    fn virtualized_font_rows_join_using_filtered_logical_neighbors() {
+        let view = fixture();
+        {
+            let mut model = view.core.model.borrow_mut();
+            let family = model.families[0].clone();
+            model.families = ["Alpha", "Beta", "Gamma", "Omega"]
+                .into_iter()
+                .map(|name| model::Family {
+                    name: name.into(),
+                    faces: family.faces.clone(),
+                })
+                .collect();
+        }
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            // Only two middle rows intersect the viewport. They must not acquire
+            // the first/last corners just because the outer rows are offscreen.
+            let family_list = FamilyList {
+                core: view.core.clone(),
+                viewport: rect(0.0, ROW + 1.0, 300.0, ROW * 2.0 - 2.0),
+            };
+            let mut commands = DisplayList::new();
+            let mut measurer = TextMeasurer::new();
+            family_list.paint(
+                rect(0.0, 0.0, 300.0, ROW * 4.0),
+                &mut PaintContext::new(&mut commands, &theme, &theme.typography, &mut measurer),
+            );
+            let clips: Vec<_> = commands
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCommand::PushRoundedCornersClip { rect, radii } => Some((*rect, *radii)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(clips.len(), 2);
+            assert!(clips.iter().all(|(_, radii)| *radii == [0.0; 4]));
+            assert_eq!(
+                clips[0].0.origin.y + clips[0].0.size.height + 2.0,
+                clips[1].0.origin.y
+            );
+        }
+        view.core.search.set_value("Beta");
+        let family_list = FamilyList {
+            core: view.core.clone(),
+            viewport: rect(0.0, 0.0, 300.0, ROW),
+        };
+        let entries = family_list.entries();
+        assert_eq!(entries.len(), 1);
+        // Reconstructed rows use the same retained interaction state and dispatch
+        // the filtered font selection through the standard ListRow component.
+        let row = family_list.row(entries[0], 0, entries.len());
+        let mut commands = DisplayList::new();
+        let mut measurer = TextMeasurer::new();
+        row.paint(
+            rect(0.0, 0.0, 284.0, ROW),
+            &mut PaintContext::new(
+                &mut commands,
+                &Theme::LIGHT,
+                &Typography::DEFAULT,
+                &mut measurer,
+            ),
+        );
+        assert!(
+            !commands
+                .commands()
+                .iter()
+                .any(|command| matches!(command, DrawCommand::PushRoundedCornersClip { .. }))
+        );
+        let bounds = rect(0.0, 0.0, 284.0, ROW);
+        let mut events = EventContext::new(&Theme::LIGHT, &Typography::DEFAULT, &mut measurer);
+        row.handle_event(
+            bounds,
+            &ViewEvent::PointerPressed {
+                position: Point::new(24.0, 24.0),
+                button: appcore::viewkit::platform::PointerButton::Primary,
+            },
+            &mut events,
+        );
+        family_list.row(entries[0], 0, entries.len()).handle_event(
+            bounds,
+            &ViewEvent::PointerReleased {
+                position: Point::new(24.0, 24.0),
+                button: appcore::viewkit::platform::PointerButton::Primary,
+            },
+            &mut events,
+        );
+        assert_eq!(
+            view.core.pending.take(),
+            Some(Action::Family("Beta".into()))
+        );
+    }
+
     #[test]
     fn compact_and_wide_layouts_reserve_toolbar_and_footer() {
         for width in [320.0, 719.0, 720.0, 1000.0] {
