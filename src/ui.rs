@@ -458,7 +458,7 @@ impl FontsView {
                 self.core
                     .button("Install Font…", Action::Install)
                     .leading_symbol(SymbolName::Plus)
-                    .style(ButtonStyle::Standard)
+                    .toolbar()
                     .enabled(!busy && self.core.locations.user.is_some()),
             ),
             (
@@ -471,6 +471,7 @@ impl FontsView {
                 self.core
                     .button("", Action::Refresh)
                     .leading_symbol(SymbolName::Refresh)
+                    .toolbar()
                     .accessibility_label("Refresh font library")
                     .enabled(!busy),
             ),
@@ -480,6 +481,7 @@ impl FontsView {
                 rect(bounds.origin.x + 8.0, bounds.origin.y + 9.0, 96.0, 30.0),
                 self.core
                     .button("Fonts", Action::Back)
+                    .toolbar()
                     .leading_symbol(SymbolName::ChevronLeft),
             ));
         }
