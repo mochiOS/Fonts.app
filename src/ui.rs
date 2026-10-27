@@ -65,6 +65,7 @@ struct Core {
     alert: Alert,
     incoming: RefCell<Option<Incoming>>,
     preview: RefCell<Option<fonts::FontPreview>>,
+    toolbar: ActionToolbarState<Action>,
 }
 impl Core {
     fn button(&self, label: impl Into<String>, action: Action) -> Button {
@@ -442,50 +443,39 @@ impl FontsView {
                 alert: Alert::new(),
                 incoming: RefCell::new(None),
                 preview: RefCell::new(None),
+                toolbar: ActionToolbarState::new(),
             }),
         }
     }
-    fn toolbar(&self, bounds: Rect, compact_detail: bool) -> Vec<(Rect, Button)> {
+    fn toolbar(&self, compact_detail: bool) -> ActionToolbar<Action> {
         let busy = self.core.model.borrow().loading;
-        let mut buttons = vec![
-            (
-                rect(
-                    bounds.origin.x + bounds.size.width - 164.0,
-                    bounds.origin.y + 9.0,
-                    124.0,
-                    30.0,
-                ),
+        let mut toolbar = ActionToolbar::new(self.core.toolbar.clone());
+        if compact_detail {
+            toolbar = toolbar.leading(
+                Action::Back,
+                self.core
+                    .button("Fonts", Action::Back)
+                    .leading_symbol(SymbolName::ChevronLeft),
+            );
+        } else {
+            toolbar = toolbar.title("Fonts");
+        }
+        toolbar
+            .trailing(
+                Action::Install,
                 self.core
                     .button("Install Font…", Action::Install)
                     .leading_symbol(SymbolName::Plus)
-                    .toolbar()
                     .enabled(!busy && self.core.locations.user.is_some()),
-            ),
-            (
-                rect(
-                    bounds.origin.x + bounds.size.width - 36.0,
-                    bounds.origin.y + 9.0,
-                    28.0,
-                    30.0,
-                ),
+            )
+            .trailing(
+                Action::Refresh,
                 self.core
                     .button("", Action::Refresh)
                     .leading_symbol(SymbolName::Refresh)
-                    .toolbar()
                     .accessibility_label("Refresh font library")
                     .enabled(!busy),
-            ),
-        ];
-        if compact_detail {
-            buttons.push((
-                rect(bounds.origin.x + 8.0, bounds.origin.y + 9.0, 96.0, 30.0),
-                self.core
-                    .button("Fonts", Action::Back)
-                    .toolbar()
-                    .leading_symbol(SymbolName::ChevronLeft),
-            ));
-        }
-        buttons
+            )
     }
     fn search(&self) -> TextField {
         TextField::with_interaction(self.core.search.clone())
@@ -562,20 +552,7 @@ impl View for FontsView {
         fill(b, c.theme.colors.background, c);
         fill(f.toolbar, c.theme.colors.surface_subtle, c);
         let compact = b.size.width < 720.0 && model.detail_open;
-        if !compact {
-            Text::label("Fonts").paint(
-                rect(
-                    b.origin.x + 16.0,
-                    b.origin.y + 12.0,
-                    (b.size.width - 192.0).max(0.0),
-                    24.0,
-                ),
-                c,
-            );
-        }
-        for (bounds, button) in self.toolbar(f.toolbar, compact) {
-            button.paint(bounds, c);
-        }
+        self.toolbar(compact).paint(f.toolbar, c);
         if let Some(sidebar) = f.sidebar {
             fill(sidebar, c.theme.colors.surface_subtle, c);
             self.search().paint(
@@ -689,12 +666,10 @@ impl View for FontsView {
         }
         let f = Frames::new(b, self.core.model.borrow().detail_open);
         let mut result = EventResult::Ignored;
-        for (bounds, button) in self.toolbar(
-            f.toolbar,
-            b.size.width < 720.0 && self.core.model.borrow().detail_open,
-        ) {
-            result = result.merge(button.handle_event(bounds, e, c));
-        }
+        result = result.merge(
+            self.toolbar(b.size.width < 720.0 && self.core.model.borrow().detail_open)
+                .handle_event(f.toolbar, e, c),
+        );
         if let Some(sidebar) = f.sidebar {
             result = result.merge(self.search().handle_event(
                 rect(
@@ -1327,6 +1302,76 @@ mod tests {
             view.core.pending.take(),
             Some(Action::Family("Beta".into()))
         );
+    }
+
+    #[test]
+    fn narrow_toolbar_keeps_refresh_available_through_the_native_overflow_menu() {
+        let view = fixture();
+        let theme = Theme::LIGHT;
+        let bounds = rect(0.0, 0.0, 160.0, 680.0);
+        let mut text = TextMeasurer::new();
+        let more = view
+            .toolbar(false)
+            .action_bounds(
+                &Action::Refresh,
+                Frames::new(bounds, false).toolbar,
+                &mut MeasureContext {
+                    theme: &theme,
+                    typography: &theme.typography,
+                    text_measurer: &mut text,
+                },
+            )
+            .unwrap();
+        let position = Point::new(
+            more.origin.x + more.size.width / 2.0,
+            more.origin.y + more.size.height / 2.0,
+        );
+        let mut events = EventContext::new(&theme, &theme.typography, &mut text);
+        view.handle_event(
+            bounds,
+            &ViewEvent::PointerPressed {
+                position,
+                button: appcore::viewkit::platform::PointerButton::Primary,
+            },
+            &mut events,
+        );
+        view.handle_event(
+            bounds,
+            &ViewEvent::PointerReleased {
+                position,
+                button: appcore::viewkit::platform::PointerButton::Primary,
+            },
+            &mut events,
+        );
+        let menu = events
+            .take_context_menu_request()
+            .expect("native overflow menu");
+        assert!(
+            menu.items
+                .iter()
+                .any(|item| item.label == "Install Font…" && !item.enabled)
+        );
+        let refresh = menu
+            .items
+            .iter()
+            .find(|item| item.label == "Refresh font library")
+            .unwrap();
+        view.handle_event(
+            bounds,
+            &ViewEvent::ContextMenuResult {
+                request_id: menu.request_id,
+                command_id: Some(refresh.command_id),
+            },
+            &mut events,
+        );
+        assert!(view.core.receiver.borrow().is_some());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while view.core.receiver.borrow().is_some() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+            view.core.poll();
+        }
+        assert!(!view.core.model.borrow().loading);
     }
 
     #[test]
