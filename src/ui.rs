@@ -18,6 +18,8 @@ const ROW: f32 = 48.0;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Action {
     Refresh,
+    OpenDocument,
+    InstallPreview,
     Install,
     InstallPath(PathBuf),
     Family(String),
@@ -36,6 +38,11 @@ struct Work {
     notice: String,
     error: Option<String>,
     preferred: Option<FaceKey>,
+    preview: Option<fonts::FontPreview>,
+}
+enum Incoming {
+    Path(PathBuf),
+    Delegated(document::OpenedDocument),
 }
 struct Core {
     model: RefCell<Model>,
@@ -56,6 +63,8 @@ struct Core {
     removal: RefCell<Option<FontFile>>,
     panel: RefCell<Option<OpenPanel>>,
     alert: Alert,
+    incoming: RefCell<Option<Incoming>>,
+    preview: RefCell<Option<fonts::FontPreview>>,
 }
 impl Core {
     fn button(&self, label: impl Into<String>, action: Action) -> Button {
@@ -82,13 +91,42 @@ impl Core {
             .map(|(file, _)| file.clone());
         let confirmed = self.removal.borrow_mut().take();
         let locations = self.locations.clone();
+        let incoming = if action == Action::OpenDocument {
+            self.incoming.borrow_mut().take()
+        } else {
+            None
+        };
+        let current_preview = self.preview.borrow().clone();
         let (sender, receiver) = mpsc::sync_channel(1);
         self.model.borrow_mut().loading = true;
         let result = std::thread::Builder::new()
             .name("font-library".into())
             .spawn(move || {
                 let mut preferred = None;
+                let mut preview = None;
                 let operation = match action {
+                    Action::OpenDocument => (|| {
+                        let opened = match incoming
+                            .ok_or_else(|| std::io::Error::other("No font file was supplied."))?
+                        {
+                            Incoming::Path(path) => fonts::FontPreview::open(&locations, &path)?,
+                            Incoming::Delegated(document) => {
+                                let bytes =
+                                    document.read_to_end_limited(fonts::MAX_FONT_BYTES as usize)?;
+                                fonts::FontPreview::from_bytes(&locations, &document.path, &bytes)?
+                            }
+                        };
+                        preview = Some(opened);
+                        Ok("Preview only. Choose Install to add this font.".to_string())
+                    })(),
+                    Action::InstallPreview => current_preview
+                        .as_ref()
+                        .ok_or_else(|| std::io::Error::other("Open a font file first."))
+                        .and_then(|preview| preview.install(&locations))
+                        .map(|file| {
+                            preferred = file.faces.first().map(|face| FaceKey::new(&file, face));
+                            format!("Installed {}.", file.faces[0].family)
+                        }),
                     Action::Refresh => Ok("Font library refreshed.".to_string()),
                     Action::InstallPath(path) => fonts::install(&locations, &path).map(|file| {
                         preferred = file.faces.first().map(|face| FaceKey::new(&file, face));
@@ -127,6 +165,7 @@ impl Core {
                     notice,
                     error,
                     preferred,
+                    preview,
                 });
             });
         match result {
@@ -141,10 +180,27 @@ impl Core {
     fn poll(&self) {
         let next = self.receiver.borrow().as_ref().map(Receiver::try_recv);
         match next {
-            Some(Ok(work)) => {
+            Some(Ok(mut work)) => {
                 self.receiver.borrow_mut().take();
                 let installed = work.preferred.is_some();
+                let opened = work.preview.is_some();
                 if installed {
+                    self.preview.borrow_mut().take();
+                }
+                if let Some(preview) = work.preview.take() {
+                    *self.preview.borrow_mut() = Some(preview);
+                }
+                if let Some(preview) = self.preview.borrow().as_ref() {
+                    if opened {
+                        work.preferred = preview
+                            .file
+                            .faces
+                            .first()
+                            .map(|face| FaceKey::new(&preview.file, face));
+                    }
+                    work.catalogue.files.push(preview.file.clone());
+                }
+                if installed || opened {
                     self.search.set_value("");
                     self.last_query.borrow_mut().clear();
                 }
@@ -153,8 +209,12 @@ impl Core {
                     model.filter = Filter::User;
                     self.filter_selection.set(1);
                 }
+                if opened {
+                    model.filter = Filter::All;
+                    self.filter_selection.set(0);
+                }
                 model.update(work.catalogue, &self.search.value(), work.preferred);
-                if installed {
+                if installed || opened {
                     model.detail_open = true;
                 }
                 model.notice = if model.catalogue.warnings.is_empty() {
@@ -185,6 +245,9 @@ impl Core {
             }
             _ => {}
         }
+        if self.receiver.borrow().is_none() && self.incoming.borrow().is_some() {
+            self.start(Action::OpenDocument);
+        }
     }
     fn apply(&self) -> bool {
         let mut changed = false;
@@ -212,9 +275,12 @@ impl Core {
             return changed;
         }
         match action {
-            Action::Refresh | Action::InstallPath(_) | Action::Toggle | Action::ConfirmRemove => {
-                self.start(action)
-            }
+            Action::Refresh
+            | Action::OpenDocument
+            | Action::InstallPreview
+            | Action::InstallPath(_)
+            | Action::Toggle
+            | Action::ConfirmRemove => self.start(action),
             Action::Install => {
                 if let Some(panel) = self.panel.borrow().as_ref() {
                     panel.show();
@@ -314,6 +380,23 @@ impl Frames {
     }
 }
 impl FontsView {
+    pub fn open_path(&self, path: PathBuf) {
+        *self.core.incoming.borrow_mut() = Some(Incoming::Path(path));
+        if self.core.receiver.borrow().is_none() {
+            self.core.start(Action::OpenDocument);
+        }
+    }
+    pub fn open_delegated(&self, document: document::OpenedDocument) {
+        *self.core.incoming.borrow_mut() = Some(Incoming::Delegated(document));
+        if self.core.receiver.borrow().is_none() {
+            self.core.start(Action::OpenDocument);
+        }
+    }
+    pub fn open_error(&self, message: String) {
+        self.core
+            .alert
+            .present_error("The font could not be opened.", message);
+    }
     pub fn new() -> Self {
         let view = Self::with_model(Model::new(), Locations::current());
         let pending = view.core.pending.clone();
@@ -357,6 +440,8 @@ impl FontsView {
                 removal: RefCell::new(None),
                 panel: RefCell::new(None),
                 alert: Alert::new(),
+                incoming: RefCell::new(None),
+                preview: RefCell::new(None),
             }),
         }
     }
@@ -785,8 +870,18 @@ impl Detail {
                     )),
             );
         };
-        let filename = file
-            .path
+        let preview = self.0.preview.borrow();
+        let opened = preview
+            .as_ref()
+            .filter(|preview| preview.file.path == file.path);
+        let installed = model
+            .catalogue
+            .files
+            .iter()
+            .find(|other| other.path != file.path && other.digest == file.digest);
+        let filename = opened
+            .map(|preview| &preview.source)
+            .unwrap_or(&file.path)
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default()
@@ -798,10 +893,42 @@ impl Detail {
                 Text::caption(format!(
                     "{} · {}",
                     face.style,
-                    model::scope_label(file.scope)
+                    if opened.is_some() {
+                        "Opened file"
+                    } else {
+                        model::scope_label(file.scope)
+                    }
                 ))
                 .color(theme.colors.text_secondary),
             );
+        if let Some(preview) = opened {
+            stack = stack
+                .child(
+                    Text::caption(preview.source.to_string_lossy().into_owned())
+                        .color(theme.colors.text_secondary),
+                )
+                .child(
+                    self.0
+                        .button(
+                            if let Some(installed) = installed {
+                                if installed.enabled {
+                                    "Installed"
+                                } else {
+                                    "Installed · Disabled"
+                                }
+                            } else {
+                                "Install"
+                            },
+                            Action::InstallPreview,
+                        )
+                        .style(ButtonStyle::Primary)
+                        .enabled(
+                            installed.is_none()
+                                && !model.loading
+                                && self.0.locations.user.is_some(),
+                        ),
+                );
+        }
         if let Some(family) = model
             .families
             .iter()
@@ -818,7 +945,18 @@ impl Detail {
                     let mut button = self
                         .0
                         .button(
-                            format!("{} · {}", face.style, model::scope_label(font.scope)),
+                            format!(
+                                "{} · {}",
+                                face.style,
+                                if preview
+                                    .as_ref()
+                                    .is_some_and(|preview| preview.file.path == font.path)
+                                {
+                                    "Opened file"
+                                } else {
+                                    model::scope_label(font.scope)
+                                }
+                            ),
                             Action::Face(key.clone()),
                         )
                         .accessibility_selected(model.face.as_ref() == Some(key));
@@ -895,7 +1033,7 @@ impl Detail {
         {
             stack=stack.child(Text::caption("A system font shares this family name. The OS interface keeps its system font.").color(theme.colors.text_secondary));
         }
-        if !file.enabled {
+        if !file.enabled && opened.is_none() {
             stack = stack.child(
                 Text::caption("Disabled · Preview only; unavailable to normal font selection.")
                     .color(theme.colors.text_secondary),
@@ -904,7 +1042,15 @@ impl Detail {
         stack = stack
             .child(Divider::new())
             .child(info("Full name", &face.full_name, theme))
-            .child(info("Collection", model::scope_label(file.scope), theme))
+            .child(info(
+                "Collection",
+                if opened.is_some() {
+                    "Opened file"
+                } else {
+                    model::scope_label(file.scope)
+                },
+                theme,
+            ))
             .child(info(
                 "Typeface",
                 if face.variable {
@@ -957,7 +1103,7 @@ impl Detail {
                             .enabled(!model.loading),
                     ),
             );
-        } else {
+        } else if opened.is_none() {
             stack = stack.child(
                 Text::caption(if file.scope == fonts::Scope::User {
                     "Externally managed font. Import it to manage a copy in Fonts."
@@ -1011,6 +1157,83 @@ mod tests {
         model.update(fonts::catalogue(&locations), "Inter", None);
         FontsView::with_model(model, locations)
     }
+    #[test]
+    fn file_open_previews_before_installing_and_reports_existing_fonts() {
+        let source = fixture().core.model.borrow().catalogue.files[0]
+            .path
+            .clone();
+        let root = std::env::temp_dir().join(format!("fonts-document-ui-{}", std::process::id()));
+        assert!(!root.exists());
+        let locations = Locations {
+            system: vec![],
+            shared: vec![],
+            user: Some(root.clone()),
+        };
+        let view = FontsView::with_model(Model::new(), locations);
+        fn settle(view: &FontsView) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                view.core.poll();
+                if view.core.receiver.borrow().is_none() && view.core.incoming.borrow().is_none() {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "font worker did not finish");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        fn has_label(view: &FontsView, label: &str) -> bool {
+            let mut list = DisplayList::new();
+            let mut measurer = TextMeasurer::new();
+            Detail(view.core.clone()).paint(
+                rect(0.0, 0.0, 720.0, 900.0),
+                &mut PaintContext::new(
+                    &mut list,
+                    &Theme::LIGHT,
+                    &Typography::DEFAULT,
+                    &mut measurer,
+                ),
+            );
+            list.commands().iter().any(|command| matches!(command, DrawCommand::DrawText { command } if command.text == label))
+        }
+        view.core.start(Action::Refresh);
+        view.open_path(source.clone());
+        settle(&view);
+        assert!(
+            view.core.preview.borrow().is_some(),
+            "{}",
+            view.core.model.borrow().notice
+        );
+        assert!(has_label(&view, "Install"));
+        assert!(fonts::catalogue(&view.core.locations).files.is_empty());
+        let stage = view
+            .core
+            .preview
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .file
+            .path
+            .clone();
+        view.core.pending.set(Some(Action::InstallPreview));
+        view.core.apply();
+        settle(&view);
+        assert!(view.core.preview.borrow().is_none());
+        assert!(!stage.exists());
+        assert!(view.core.model.borrow().selected_face().unwrap().0.managed);
+        assert_eq!(fonts::catalogue(&view.core.locations).files.len(), 1);
+        view.open_path(source.clone());
+        settle(&view);
+        assert!(has_label(&view, "Installed"));
+        let file = fonts::catalogue(&view.core.locations).files.remove(0);
+        fonts::set_enabled(&view.core.locations, &file, false).unwrap();
+        view.open_path(source);
+        settle(&view);
+        assert!(has_label(&view, "Installed · Disabled"));
+        assert_eq!(fonts::catalogue(&view.core.locations).files.len(), 1);
+        drop(view);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn virtualized_font_rows_join_using_filtered_logical_neighbors() {
         let view = fixture();

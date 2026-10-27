@@ -16,6 +16,9 @@ entry = "entry.elf"
 description = "Browse, preview and manage fonts"
 icon = "appicon.png"
 resources = ["appicon.png"]
+document_roles = ["view"]
+document_content_types = ["font/ttf", "font/otf", "font/collection"]
+document_extensions = ["ttf", "otf", "ttc", "otc"]
 
 [[binary]]
 path = "/system/applications/Fonts.app/entry.elf"

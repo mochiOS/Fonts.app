@@ -7,9 +7,23 @@ struct FontsApp {
 impl App for FontsApp {
     type Body = ui::FontsView;
     fn new() -> Self {
-        Self {
+        let app = Self {
             view: ui::FontsView::new(),
+        };
+        if let Some(path) = std::env::args_os()
+            .skip(1)
+            .map(std::path::PathBuf::from)
+            .find(|path| {
+                path.extension().and_then(|s| s.to_str()).is_some_and(|s| {
+                    ["ttf", "otf", "ttc", "otc"]
+                        .iter()
+                        .any(|ext| s.eq_ignore_ascii_case(ext))
+                })
+            })
+        {
+            app.view.open_path(path);
         }
+        app
     }
     fn window(&self) -> WindowOptions {
         WindowOptions::new("Fonts")
@@ -18,6 +32,23 @@ impl App for FontsApp {
     }
     fn body(&self, _: &ViewContext) -> Self::Body {
         self.view.clone()
+    }
+    fn handle_platform_message_with_handles(
+        &mut self,
+        message: &[u8],
+        handles: &mut [PlatformFileHandle],
+    ) -> bool {
+        match document::decode_open_message(message, handles) {
+            Ok(Some(document)) => {
+                self.view.open_delegated(document);
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                self.view.open_error(error.to_string());
+                true
+            }
+        }
     }
 }
 fn main() -> Result<(), ViewKitError> {

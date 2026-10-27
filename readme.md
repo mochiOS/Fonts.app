@@ -11,6 +11,9 @@ The standard language is English; Japanese is available as a preview specimen.
 - Type a specimen, switch English/Japanese samples, and adjust 12–96px size.
 - Inspect source, full name, variable/monospaced status, glyph count, format and size.
 - Install `.ttf`, `.otf`, `.ttc` or `.otc` through the standard Files.app OpenPanel.
+- Open font files from Files.app using AppCore's manifest associations and
+  document delivery. Preview first, choose Install explicitly, and see whether
+  the exact file is already installed, including disabled installations.
 - Enable/disable a managed user font file; confirm before removing its entire file.
 - Retain selection across refresh/enable changes and distinguish external copies.
 - Use master/detail panes at normal widths and a separate detail page below 720px.
@@ -53,6 +56,13 @@ Linux reads host system font directories but writes only the isolated mochiOS
 preview font folder (`MOCHIOS_PREVIEW_CONFIG_ROOT/fonts`). It never changes host
 font installations. The full desktop discards its session font folder on exit.
 The standalone preview has no file-panel broker; use `mmake ui` for installation.
+
+Opening a font creates a validated, disabled snapshot in the reserved user-font
+`.previews` folder. Discovery excludes this folder, so opening does not install
+or activate the font. File-backed aliases also let the Linux desktop renderer
+read the exact preview. Installation uses the snapshot, never a reopened source.
+Snapshots are removed when their last owner closes; storage refuses more than
+eight files or 128 MiB. A crash may leave snapshots behind in that folder.
 
 Google Fonts search/download, variable-axis editing and remote font libraries are
 not implemented in this local-management stage. No network capability is requested.
