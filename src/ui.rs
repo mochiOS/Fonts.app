@@ -514,6 +514,7 @@ impl FontsView {
     fn search(&self) -> TextField {
         TextField::with_interaction(self.core.search.clone())
             .placeholder("Search fonts")
+            .leading_symbol(SymbolName::Search)
             .enabled(true)
     }
     fn filters(&self) -> SegmentedControl {
@@ -949,7 +950,7 @@ impl Detail {
             TextField::with_interaction(self.0.specimen.clone())
                 .placeholder("Type your preview text")
                 .layout()
-                .height(32.0),
+                .height(theme.controls.height),
         );
         stack = stack.child(
             HStack::new()
@@ -1560,6 +1561,40 @@ mod tests {
             );
             assert_eq!(view.core.model.borrow().selected, Some(selected.clone()));
             assert_eq!(view.core.model.borrow().face, face);
+        }
+    }
+    #[test]
+    fn search_and_specimen_fields_share_control_height_and_centered_labels() {
+        let view = fixture();
+        view.core.specimen.clear();
+        let theme = Theme::LIGHT;
+        let bounds = rect(0.0, 0.0, 1000.0, 680.0);
+        let mut list = DisplayList::new();
+        let mut text = TextMeasurer::new();
+        view.paint(
+            bounds,
+            &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut text),
+        );
+        let search =
+            SidebarFrames::new(Frames::new(bounds, false, &theme).sidebar.unwrap(), &theme).search;
+        assert!(list.commands().iter().any(|command| matches!(command, DrawCommand::DrawSvg { command } if search.contains(Point::new(command.bounds.origin.x, command.bounds.origin.y)))));
+        for placeholder in ["Search fonts", "Type your preview text"] {
+            let command = list
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    DrawCommand::DrawText { command } if command.text == placeholder => {
+                        Some(command)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert!(list.commands().iter().any(|item| matches!(item,
+                DrawCommand::FillRoundedRect { rect, color, .. } if *color == theme.text_field.background
+                    && rect.size.height == theme.controls.height
+                    && rect.contains(command.bounds.origin)
+                    && (command.bounds.origin.y + command.line_height * 0.5 - (rect.origin.y + rect.size.height * 0.5)).abs() < 0.01
+            )));
         }
     }
 }
