@@ -1522,4 +1522,44 @@ mod tests {
                 && command.bounds.origin.y == detail.origin.y + theme.spacing.extra_large
         )));
     }
+    #[test]
+    fn virtualized_family_selection_survives_window_activation_changes() {
+        let view = fixture();
+        let mut theme = Theme::LIGHT;
+        theme.motion = theme.motion.reduced();
+        let selected = view.core.model.borrow().selected.clone().unwrap();
+        let face = view.core.model.borrow().face.clone();
+        let bounds = rect(0.0, 0.0, 1000.0, 680.0);
+        let mut text = TextMeasurer::new();
+        for active in [true, false, true] {
+            let mut list = DisplayList::new();
+            view.paint(
+                bounds,
+                &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut text)
+                    .with_window_active(active),
+            );
+            let color = list
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    DrawCommand::DrawText { command }
+                        if command.text == selected && command.bounds.origin.x < 260.0 =>
+                    {
+                        Some(command.color)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                color,
+                if active {
+                    theme.list.selected_foreground
+                } else {
+                    theme.list.inactive_selected_foreground
+                }
+            );
+            assert_eq!(view.core.model.borrow().selected, Some(selected.clone()));
+            assert_eq!(view.core.model.borrow().face, face);
+        }
+    }
 }
