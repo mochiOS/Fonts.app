@@ -582,7 +582,11 @@ impl View for FontsView {
             self.sidebar(sidebar).paint(list, c);
         }
         if let Some(detail) = f.detail {
-            self.detail().paint(detail, c);
+            fill(detail, c.theme.colors.surface_subtle, c);
+            Surface::pane()
+                .in_container(b)
+                .content(self.detail())
+                .paint(detail, c);
         }
         fill(f.footer, c.theme.colors.surface_subtle, c);
         let status = if model.loading {
@@ -703,7 +707,12 @@ impl View for FontsView {
             ));
         }
         if let Some(detail) = f.detail {
-            result = result.merge(self.detail().handle_event(detail, e, c));
+            result = result.merge(
+                Surface::pane()
+                    .in_container(b)
+                    .content(self.detail())
+                    .handle_event(detail, e, c),
+            );
         }
         if result == EventResult::Ignored
             && b.size.width < 720.0
@@ -1403,6 +1412,26 @@ mod tests {
                     &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut measurer),
                 );
                 assert!(list.commands().iter().any(|command|matches!(command,DrawCommand::DrawText{command} if command.font_family.starts_with("mochi-font:") && command.text==ENGLISH)));
+                let detail = Frames::new(rect(0.0, 0.0, width, 680.0), true)
+                    .detail
+                    .unwrap();
+                let expected = if width >= 720.0 {
+                    [theme.radius.medium, 0.0, 0.0, theme.radius.medium]
+                } else {
+                    [0.0; 4]
+                };
+                assert_eq!(
+                    list.commands().iter().find_map(|command| match command {
+                        DrawCommand::PushRoundedCornersClip { rect, radii } if *rect == detail =>
+                            Some(*radii),
+                        _ => None,
+                    }),
+                    expected
+                        .iter()
+                        .any(|radius| *radius > 0.0)
+                        .then_some(expected)
+                );
+
                 assert!(!list.commands().iter().any(|command|matches!(command,DrawCommand::DrawText{command} if command.text=="Remove Font…")));
             }
         }
