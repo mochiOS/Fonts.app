@@ -336,6 +336,40 @@ struct Frames {
     detail: Option<Rect>,
     footer: Rect,
 }
+#[derive(Clone, Copy)]
+struct SidebarFrames {
+    search: Rect,
+    filters: Rect,
+    list: Rect,
+}
+impl SidebarFrames {
+    fn new(bounds: Rect, theme: &Theme) -> Self {
+        let inset = theme.spacing.medium.min(bounds.size.width * 0.5);
+        let bottom = bounds.origin.y + bounds.size.height;
+        let search_y = (bounds.origin.y + theme.spacing.medium).min(bottom);
+        let search = rect(
+            bounds.origin.x + inset,
+            search_y,
+            bounds.size.width - inset * 2.0,
+            theme.controls.height.min(bottom - search_y),
+        );
+        let filter_y = (search_y + search.size.height + theme.spacing.small).min(bottom);
+        let filters = rect(
+            search.origin.x,
+            filter_y,
+            search.size.width,
+            theme.layout.segmented_control_height.min(bottom - filter_y),
+        );
+        let list_y = (filter_y + filters.size.height + theme.spacing.small).min(bottom);
+        let list = rect(bounds.origin.x, list_y, bounds.size.width, bottom - list_y);
+        Self {
+            search,
+            filters,
+            list,
+        }
+    }
+}
+
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
     Rect::new(x, y, w.max(0.0), h.max(0.0))
 }
@@ -345,9 +379,9 @@ fn fill(bounds: Rect, color: Color, c: &mut PaintContext<'_>) {
         .paint(bounds, c);
 }
 impl Frames {
-    fn new(bounds: Rect, detail: bool) -> Self {
-        let top = bounds.size.height.min(48.0);
-        let bottom = (bounds.size.height - top).clamp(0.0, 32.0);
+    fn new(bounds: Rect, detail: bool, theme: &Theme) -> Self {
+        let top = bounds.size.height.min(theme.layout.top_bar_height);
+        let bottom = (bounds.size.height - top).clamp(0.0, theme.layout.status_bar_height);
         let body = rect(
             bounds.origin.x,
             bounds.origin.y + top,
@@ -500,13 +534,7 @@ impl FontsView {
             })))
         })
     }
-    fn sidebar(&self, b: Rect) -> Scroll {
-        let viewport = rect(
-            b.origin.x,
-            b.origin.y + 84.0,
-            b.size.width,
-            b.size.height - 84.0,
-        );
+    fn sidebar(&self, viewport: Rect) -> Scroll {
         Scroll::new(self.core.list_scroll.clone()).content(FamilyList {
             core: self.core.clone(),
             viewport,
@@ -545,7 +573,7 @@ impl View for FontsView {
         self.core.apply();
         self.core.poll();
         let model = self.core.model.borrow();
-        let f = Frames::new(b, model.detail_open);
+        let f = Frames::new(b, model.detail_open, c.theme);
         if model.loading {
             c.request_redraw_in_at(b, Instant::now() + Duration::from_millis(80));
         }
@@ -555,31 +583,10 @@ impl View for FontsView {
         self.toolbar(compact).paint(f.toolbar, c);
         if let Some(sidebar) = f.sidebar {
             fill(sidebar, c.theme.colors.surface_subtle, c);
-            self.search().paint(
-                rect(
-                    sidebar.origin.x + 12.0,
-                    sidebar.origin.y + 10.0,
-                    sidebar.size.width - 24.0,
-                    30.0,
-                ),
-                c,
-            );
-            self.filters().paint(
-                rect(
-                    sidebar.origin.x + 12.0,
-                    sidebar.origin.y + 48.0,
-                    sidebar.size.width - 24.0,
-                    28.0,
-                ),
-                c,
-            );
-            let list = rect(
-                sidebar.origin.x,
-                sidebar.origin.y + 84.0,
-                sidebar.size.width,
-                sidebar.size.height - 84.0,
-            );
-            self.sidebar(sidebar).paint(list, c);
+            let controls = SidebarFrames::new(sidebar, c.theme);
+            self.search().paint(controls.search, c);
+            self.filters().paint(controls.filters, c);
+            self.sidebar(controls.list).paint(controls.list, c);
         }
         if let Some(detail) = f.detail {
             fill(detail, c.theme.colors.surface_subtle, c);
@@ -607,17 +614,17 @@ impl View for FontsView {
                 model.catalogue.files.len()
             )
         };
-        Text::caption(status)
-            .color(c.theme.colors.text_secondary)
-            .paint(
-                rect(
-                    f.footer.origin.x + 12.0,
-                    f.footer.origin.y + 4.0,
-                    f.footer.size.width - 24.0,
-                    24.0,
+        Padding::symmetric(c.theme.spacing.medium, 0.0)
+            .content(
+                HStack::new().child(
+                    Text::caption(status)
+                        .color(c.theme.colors.text_secondary)
+                        .layout()
+                        .flex_grow(1.0)
+                        .flex_shrink(1.0),
                 ),
-                c,
-            );
+            )
+            .paint(f.footer, c);
         drop(model);
         if self.core.removal.borrow().is_some() {
             fill(b, c.theme.shell.scrim, c);
@@ -668,43 +675,20 @@ impl View for FontsView {
             }
             return EventResult::Consumed;
         }
-        let f = Frames::new(b, self.core.model.borrow().detail_open);
+        let f = Frames::new(b, self.core.model.borrow().detail_open, c.theme());
         let mut result = EventResult::Ignored;
         result = result.merge(
             self.toolbar(b.size.width < 720.0 && self.core.model.borrow().detail_open)
                 .handle_event(f.toolbar, e, c),
         );
         if let Some(sidebar) = f.sidebar {
-            result = result.merge(self.search().handle_event(
-                rect(
-                    sidebar.origin.x + 12.0,
-                    sidebar.origin.y + 10.0,
-                    sidebar.size.width - 24.0,
-                    30.0,
-                ),
-                e,
-                c,
-            ));
-            result = result.merge(self.filters().handle_event(
-                rect(
-                    sidebar.origin.x + 12.0,
-                    sidebar.origin.y + 48.0,
-                    sidebar.size.width - 24.0,
-                    28.0,
-                ),
-                e,
-                c,
-            ));
-            result = result.merge(self.sidebar(sidebar).handle_event(
-                rect(
-                    sidebar.origin.x,
-                    sidebar.origin.y + 84.0,
-                    sidebar.size.width,
-                    sidebar.size.height - 84.0,
-                ),
-                e,
-                c,
-            ));
+            let controls = SidebarFrames::new(sidebar, c.theme());
+            result = result.merge(self.search().handle_event(controls.search, e, c));
+            result = result.merge(self.filters().handle_event(controls.filters, e, c));
+            result = result.merge(
+                self.sidebar(controls.list)
+                    .handle_event(controls.list, e, c),
+            );
         }
         if let Some(detail) = f.detail {
             result = result.merge(
@@ -835,13 +819,13 @@ fn info(label: &str, value: impl Into<String>, theme: &Theme) -> HStack {
         .child(Text::body(value.into()).layout().flex_grow(1.0))
 }
 impl Detail {
-    fn content(&self, theme: &Theme) -> Padding<VStack> {
+    fn content(&self, theme: &Theme) -> ContentArea<VStack> {
         let model = self.0.model.borrow();
         let mut stack = VStack::new()
             .alignment(StackAlignment::Stretch)
             .gap(StackGap::Medium);
         let Some((file, face)) = model.selected_face() else {
-            return Padding::all(theme.spacing.large).content(
+            return ContentArea::pane(
                 stack
                     .child(Text::styled(
                         if model.loading {
@@ -1099,7 +1083,7 @@ impl Detail {
                 .color(theme.colors.text_secondary),
             );
         }
-        Padding::all(theme.spacing.large).content(stack)
+        ContentArea::pane(stack)
     }
 }
 impl View for Detail {
@@ -1323,7 +1307,7 @@ mod tests {
             .toolbar(false)
             .action_bounds(
                 &Action::Refresh,
-                Frames::new(bounds, false).toolbar,
+                Frames::new(bounds, false, &theme).toolbar,
                 &mut MeasureContext {
                     theme: &theme,
                     typography: &theme.typography,
@@ -1388,7 +1372,7 @@ mod tests {
         for width in [320.0, 719.0, 720.0, 1000.0] {
             for detail in [false, true] {
                 let b = rect(12.0, 20.0, width, 600.0);
-                let f = Frames::new(b, detail);
+                let f = Frames::new(b, detail, &Theme::LIGHT);
                 for body in [f.sidebar, f.detail].into_iter().flatten() {
                     assert!(body.origin.y >= f.toolbar.origin.y + f.toolbar.size.height);
                     assert!(body.origin.y + body.size.height <= f.footer.origin.y);
@@ -1412,7 +1396,7 @@ mod tests {
                     &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut measurer),
                 );
                 assert!(list.commands().iter().any(|command|matches!(command,DrawCommand::DrawText{command} if command.font_family.starts_with("mochi-font:") && command.text==ENGLISH)));
-                let detail = Frames::new(rect(0.0, 0.0, width, 680.0), true)
+                let detail = Frames::new(rect(0.0, 0.0, width, 680.0), true, &theme)
                     .detail
                     .unwrap();
                 let expected = if width >= 720.0 {
@@ -1483,5 +1467,59 @@ mod tests {
         assert!(view.core.removal.borrow().is_none());
         assert!(view.core.receiver.borrow().is_none());
         assert_eq!(view.core.model.borrow().catalogue.files.len(), count);
+    }
+    #[test]
+    fn pane_content_and_sidebar_geometry_follow_shared_theme_metrics() {
+        let mut theme = Theme::LIGHT;
+        theme.layout.top_bar_height = 56.0;
+        theme.layout.status_bar_height = 36.0;
+        for width in [320.0, 1000.0] {
+            let bounds = rect(10.0, 20.0, width, 600.0);
+            let frames = Frames::new(bounds, false, &theme);
+            assert_eq!(frames.toolbar.size.height, theme.layout.top_bar_height);
+            assert_eq!(frames.footer.size.height, theme.layout.status_bar_height);
+            let sidebar = frames.sidebar.unwrap();
+            let controls = SidebarFrames::new(sidebar, &theme);
+            assert_eq!(
+                controls.search.origin.y,
+                sidebar.origin.y + theme.spacing.medium
+            );
+            assert_eq!(controls.search.size.height, theme.controls.height);
+            assert_eq!(
+                controls.filters.size.height,
+                theme.layout.segmented_control_height
+            );
+            assert_eq!(
+                controls.list.origin.y,
+                controls.filters.origin.y + controls.filters.size.height + theme.spacing.small
+            );
+            assert_eq!(
+                controls.list.origin.y + controls.list.size.height,
+                frames.footer.origin.y
+            );
+        }
+        let view = fixture();
+        let mut list = DisplayList::new();
+        let mut text = TextMeasurer::new();
+        let family = view
+            .core
+            .model
+            .borrow()
+            .selected_face()
+            .unwrap()
+            .1
+            .family
+            .clone();
+        let bounds = rect(0.0, 0.0, 1000.0, 680.0);
+        view.paint(
+            bounds,
+            &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut text),
+        );
+        let detail = Frames::new(bounds, false, &theme).detail.unwrap();
+        assert!(list.commands().iter().any(|command| matches!(command,
+            DrawCommand::DrawText { command } if command.text == family
+                && command.bounds.origin.x == detail.origin.x + theme.spacing.extra_large
+                && command.bounds.origin.y == detail.origin.y + theme.spacing.extra_large
+        )));
     }
 }
