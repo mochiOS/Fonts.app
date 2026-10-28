@@ -1416,7 +1416,7 @@ mod tests {
                     .detail
                     .unwrap();
                 let expected = if width >= 720.0 {
-                    [theme.radius.medium, 0.0, 0.0, theme.radius.medium]
+                    [theme.radius.extra_large, 0.0, 0.0, theme.radius.extra_large]
                 } else {
                     [0.0; 4]
                 };
