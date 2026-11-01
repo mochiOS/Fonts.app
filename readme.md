@@ -4,6 +4,14 @@ Native AppCore / ViewKit font manager for mochiOS. Uses the existing omochi
 controls, VK Symbols and the unchanged `docs/resources/appicons/Fonts.app.png`.
 The standard language is English; Japanese is available as a preview specimen.
 
+The application toolbar uses ViewKit's `Toolbar` and `ActionToolbar`. At normal
+widths, `NavigationSplitView` owns sidebar sizing, pane backgrounds, continuous
+corner clipping and input routing. Compact widths retain separate library and
+specimen views. The family list keeps its native `ListRow` selection states,
+logical-neighbor corners and row gap; its virtualized measurement and hit regions
+use the same shared row-height and spacing tokens. Search, filters and the list
+receive their actual sidebar viewport after each resize.
+
 ## Features
 
 - Search font families and full face names; filter All, User or System.
@@ -73,5 +81,6 @@ Tests cover invalid/oversized collections, duplicate publication, protected and
 stale files, symlink rejection, enable/disable/delete, notification errors,
 collection indices, duplicate-copy selection, search and compact layout,
 confirmation cancellation, exact preview data, preservation of OS UI fonts,
-and bounded preview history. Linux and mochiOS builds are checked; visual and
+bounded preview history, pane-corner backdrops in both themes, and virtualized
+row geometry after theme changes. Linux and mochiOS builds are checked; visual and
 on-device verification are performed by the user.

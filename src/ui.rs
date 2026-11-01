@@ -2,6 +2,7 @@ use crate::model::{self, FaceKey, Filter, Model};
 use appcore::fonts::{self, Catalogue, FontFile, Locations};
 use appcore::prelude::*;
 use appcore::viewkit::{
+    edge_insets::EdgeInsets,
     event::{EventContext, EventResult, ViewEvent},
     view::{Constraints, MeasureContext, PaintContext},
 };
@@ -14,7 +15,9 @@ use std::time::{Duration, Instant};
 
 const ENGLISH: &str = "The quick brown fox jumps over the lazy dog.";
 const JAPANESE: &str = "あーかい狐と緑のたっぬっき～";
-const ROW: f32 = 48.0;
+#[cfg(test)]
+const ROW: f32 = Theme::LIGHT.layout.settings_row_height;
+const COMPACT_WIDTH: f32 = 720.0;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Action {
     Refresh,
@@ -332,6 +335,7 @@ pub struct FontsView {
 #[derive(Clone, Copy)]
 struct Frames {
     toolbar: Rect,
+    body: Rect,
     sidebar: Option<Rect>,
     detail: Option<Rect>,
     footer: Rect,
@@ -388,21 +392,16 @@ impl Frames {
             bounds.size.width,
             bounds.size.height - top - bottom,
         );
-        let (sidebar, detail) = if bounds.size.width < 720.0 {
+        let (sidebar, detail) = if bounds.size.width < COMPACT_WIDTH {
             ((!detail).then_some(body), detail.then_some(body))
         } else {
-            (
-                Some(rect(body.origin.x, body.origin.y, 260.0, body.size.height)),
-                Some(rect(
-                    body.origin.x + 260.0,
-                    body.origin.y,
-                    body.size.width - 260.0,
-                    body.size.height,
-                )),
-            )
+            let (sidebar, _, detail) =
+                split(Spacer::new(), Spacer::new(), theme).content_regions(body, theme);
+            (Some(sidebar), Some(detail))
         };
         Self {
             toolbar: rect(bounds.origin.x, bounds.origin.y, bounds.size.width, top),
+            body,
             sidebar,
             detail,
             footer: rect(
@@ -413,6 +412,18 @@ impl Frames {
             ),
         }
     }
+}
+// Shared sizing policy for painting, event routing and virtualized viewport tests.
+fn split<Sidebar, Detail>(
+    sidebar: Sidebar,
+    detail: Detail,
+    theme: &Theme,
+) -> NavigationSplitView<Sidebar, Detail> {
+    NavigationSplitView::new(sidebar, detail)
+        .flexible_sidebar(200.0, theme.layout.navigation_sidebar_width, 280.0)
+        .minimum_detail_width(420.0)
+        .sidebar_insets(EdgeInsets::ZERO)
+        .shows_divider(false)
 }
 impl FontsView {
     pub fn open_path(&self, path: PathBuf) {
@@ -566,11 +577,8 @@ impl FontsView {
                 .child(self.core.button("Remove Font",Action::ConfirmRemove).style(ButtonStyle::Danger))))
     }
 }
-impl View for FontsView {
-    fn measure(&self, c: Constraints, _: &mut MeasureContext<'_>) -> Size {
-        c.constrain(c.maximum)
-    }
-    fn paint(&self, b: Rect, c: &mut PaintContext<'_>) {
+impl FontsView {
+    fn paint_content(&self, b: Rect, c: &mut PaintContext<'_>) {
         self.core.apply();
         self.core.poll();
         let model = self.core.model.borrow();
@@ -579,22 +587,16 @@ impl View for FontsView {
             c.request_redraw_in_at(b, Instant::now() + Duration::from_millis(80));
         }
         fill(b, c.theme.colors.background, c);
-        fill(f.toolbar, c.theme.colors.surface_subtle, c);
-        let compact = b.size.width < 720.0 && model.detail_open;
-        self.toolbar(compact).paint(f.toolbar, c);
-        if let Some(sidebar) = f.sidebar {
-            fill(sidebar, c.theme.colors.surface_subtle, c);
-            let controls = SidebarFrames::new(sidebar, c.theme);
-            self.search().paint(controls.search, c);
-            self.filters().paint(controls.filters, c);
-            self.sidebar(controls.list).paint(controls.list, c);
-        }
-        if let Some(detail) = f.detail {
-            fill(detail, c.theme.colors.surface_subtle, c);
-            Surface::pane()
-                .in_container(b)
-                .content(self.detail())
-                .paint(detail, c);
+        let compact = b.size.width < COMPACT_WIDTH && model.detail_open;
+        Toolbar::new(self.toolbar(compact)).paint(f.toolbar, c);
+        if b.size.width >= COMPACT_WIDTH {
+            split(FontsSidebar(self.clone()), self.detail(), c.theme).paint(f.body, c);
+        } else if let Some(sidebar) = f.sidebar {
+            Surface::sidebar()
+                .content(FontsSidebar(self.clone()))
+                .paint(sidebar, c);
+        } else if let Some(detail) = f.detail {
+            Surface::pane().content(self.detail()).paint(detail, c);
         }
         fill(f.footer, c.theme.colors.surface_subtle, c);
         let status = if model.loading {
@@ -644,7 +646,12 @@ impl View for FontsView {
             panel.paint(b, c);
         }
     }
-    fn handle_event(&self, b: Rect, e: &ViewEvent, c: &mut EventContext<'_>) -> EventResult {
+    fn handle_content_event(
+        &self,
+        b: Rect,
+        e: &ViewEvent,
+        c: &mut EventContext<'_>,
+    ) -> EventResult {
         if let Some(panel) = self.core.panel.borrow().as_ref() {
             if panel.is_visible() {
                 let result = panel.handle_event(b, e, c);
@@ -677,24 +684,24 @@ impl View for FontsView {
             return EventResult::Consumed;
         }
         let f = Frames::new(b, self.core.model.borrow().detail_open, c.theme());
-        let mut result = EventResult::Ignored;
-        result = result.merge(
-            self.toolbar(b.size.width < 720.0 && self.core.model.borrow().detail_open)
-                .handle_event(f.toolbar, e, c),
-        );
-        if let Some(sidebar) = f.sidebar {
-            let controls = SidebarFrames::new(sidebar, c.theme());
-            result = result.merge(self.search().handle_event(controls.search, e, c));
-            result = result.merge(self.filters().handle_event(controls.filters, e, c));
+        let mut result = Toolbar::new(
+            self.toolbar(b.size.width < COMPACT_WIDTH && self.core.model.borrow().detail_open),
+        )
+        .handle_event(f.toolbar, e, c);
+        if b.size.width >= COMPACT_WIDTH {
             result = result.merge(
-                self.sidebar(controls.list)
-                    .handle_event(controls.list, e, c),
+                split(FontsSidebar(self.clone()), self.detail(), c.theme())
+                    .handle_event(f.body, e, c),
             );
-        }
-        if let Some(detail) = f.detail {
+        } else if let Some(sidebar) = f.sidebar {
+            result = result.merge(
+                Surface::sidebar()
+                    .content(FontsSidebar(self.clone()))
+                    .handle_event(sidebar, e, c),
+            );
+        } else if let Some(detail) = f.detail {
             result = result.merge(
                 Surface::pane()
-                    .in_container(b)
                     .content(self.detail())
                     .handle_event(detail, e, c),
             );
@@ -719,6 +726,41 @@ impl View for FontsView {
         }
     }
 }
+impl View for FontsView {
+    fn measure(&self, c: Constraints, _: &mut MeasureContext<'_>) -> Size {
+        c.constrain(c.maximum)
+    }
+    fn paint(&self, b: Rect, c: &mut PaintContext<'_>) {
+        Surface::app().paint_content(b, c, |c| self.paint_content(b, c));
+    }
+    fn handle_event(&self, b: Rect, e: &ViewEvent, c: &mut EventContext<'_>) -> EventResult {
+        Surface::app().handle_content_event(b, e, c, |e, c| self.handle_content_event(b, e, c))
+    }
+}
+
+// The list needs its actual scroll viewport for bounded row painting. The
+// standard split supplies these bounds, including after a window resize.
+struct FontsSidebar(FontsView);
+impl View for FontsSidebar {
+    fn measure(&self, c: Constraints, _: &mut MeasureContext<'_>) -> Size {
+        c.constrain(c.maximum)
+    }
+    fn paint(&self, b: Rect, c: &mut PaintContext<'_>) {
+        let frames = SidebarFrames::new(b, c.theme);
+        self.0.search().paint(frames.search, c);
+        self.0.filters().paint(frames.filters, c);
+        self.0.sidebar(frames.list).paint(frames.list, c);
+    }
+    fn handle_event(&self, b: Rect, e: &ViewEvent, c: &mut EventContext<'_>) -> EventResult {
+        let frames = SidebarFrames::new(b, c.theme());
+        self.0
+            .search()
+            .handle_event(frames.search, e, c)
+            .merge(self.0.filters().handle_event(frames.filters, e, c))
+            .merge(self.0.sidebar(frames.list).handle_event(frames.list, e, c))
+    }
+}
+
 struct FamilyList {
     core: Rc<Core>,
     viewport: Rect,
@@ -748,10 +790,10 @@ impl FamilyList {
     }
 }
 impl View for FamilyList {
-    fn measure(&self, c: Constraints, _: &mut MeasureContext<'_>) -> Size {
+    fn measure(&self, c: Constraints, context: &mut MeasureContext<'_>) -> Size {
         c.constrain(Size::new(
             c.maximum.width,
-            self.entries().len().max(1) as f32 * ROW,
+            self.entries().len().max(1) as f32 * context.theme.layout.settings_row_height,
         ))
     }
     fn paint(&self, b: Rect, c: &mut PaintContext<'_>) {
@@ -774,11 +816,12 @@ impl View for FamilyList {
             );
         }
         for (row, index) in entries.iter().enumerate() {
+            let row_height = c.theme.layout.settings_row_height;
             let bounds = rect(
-                b.origin.x + 8.0,
-                b.origin.y + row as f32 * ROW,
-                b.size.width - 16.0,
-                ROW - 2.0,
+                b.origin.x + c.theme.spacing.small,
+                b.origin.y + row as f32 * row_height,
+                b.size.width - c.theme.spacing.small * 2.0,
+                row_height - c.theme.spacing.extra_small * 0.5,
             );
             if bounds.intersection(self.viewport).is_some() {
                 self.row(*index, row, entries.len()).paint(bounds, c);
@@ -789,11 +832,13 @@ impl View for FamilyList {
         let mut result = EventResult::Ignored;
         let entries = self.entries();
         for (row, index) in entries.iter().enumerate() {
+            let theme = c.theme();
+            let row_height = theme.layout.settings_row_height;
             let bounds = rect(
-                b.origin.x + 8.0,
-                b.origin.y + row as f32 * ROW,
-                b.size.width - 16.0,
-                ROW - 2.0,
+                b.origin.x + theme.spacing.small,
+                b.origin.y + row as f32 * row_height,
+                b.size.width - theme.spacing.small * 2.0,
+                row_height - theme.spacing.extra_small * 0.5,
             );
             if bounds.intersection(self.viewport).is_some() {
                 result = result.merge(
@@ -1522,6 +1567,105 @@ mod tests {
                 && command.bounds.origin.x == detail.origin.x + theme.spacing.extra_large
                 && command.bounds.origin.y == detail.origin.y + theme.spacing.extra_large
         )));
+    }
+
+    #[test]
+    fn standard_split_uses_chrome_backdrop_and_one_clip_at_pane_junctions() {
+        let view = fixture();
+        let bounds = rect(0.0, 0.0, 1000.0, 680.0);
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            let mut list = DisplayList::new();
+            let mut nodes = Vec::new();
+            let mut text = TextMeasurer::new();
+            view.paint(
+                bounds,
+                &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut text)
+                    .with_accessibility_nodes(&mut nodes),
+            );
+            assert!(nodes.iter().any(|n| n.role == AccessibilityRole::Toolbar));
+            let detail = Frames::new(bounds, false, &theme).detail.unwrap();
+            let clips: Vec<_> = list
+                .commands()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, command)| match command {
+                    DrawCommand::PushRoundedCornersClip { rect, radii } if *rect == detail => {
+                        Some((index, *radii))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(clips.len(), 1);
+            assert_eq!(
+                clips[0].1,
+                [theme.radius.extra_large, 0.0, 0.0, theme.radius.extra_large]
+            );
+            for point in [
+                detail.origin,
+                Point::new(detail.origin.x, detail.origin.y + detail.size.height - 0.5),
+            ] {
+                let backdrop = list.commands()[..clips[0].0]
+                    .iter()
+                    .rev()
+                    .find_map(|command| match command {
+                        DrawCommand::FillRect { rect, color } if rect.contains(point) => {
+                            Some(*color)
+                        }
+                        _ => None,
+                    });
+                assert_eq!(backdrop, Some(theme.colors.surface_subtle));
+            }
+        }
+    }
+
+    #[test]
+    fn virtualized_rows_share_the_theme_row_height_in_measurement_and_painting() {
+        let view = fixture();
+        let mut theme = Theme::LIGHT;
+        theme.layout.settings_row_height = 56.0;
+        let bounds = rect(0.0, 0.0, 300.0, 200.0);
+        let family_list = FamilyList {
+            core: view.core.clone(),
+            viewport: bounds,
+        };
+        let mut text = TextMeasurer::new();
+        let count = family_list.entries().len();
+        let size = family_list.measure(
+            Constraints::loose(Size::new(300.0, f32::INFINITY)),
+            &mut MeasureContext {
+                theme: &theme,
+                typography: &theme.typography,
+                text_measurer: &mut text,
+            },
+        );
+        assert_eq!(
+            size.height,
+            count.max(1) as f32 * theme.layout.settings_row_height
+        );
+        let mut list = DisplayList::new();
+        let mut nodes = Vec::new();
+        family_list.paint(
+            rect(0.0, 0.0, 300.0, size.height),
+            &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut text)
+                .with_accessibility_nodes(&mut nodes),
+        );
+        let rows: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.role == AccessibilityRole::ListItem)
+            .collect();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.len() <= 4,
+            "offscreen font rows must remain virtualized"
+        );
+        assert!(rows.iter().all(|n| n.bounds.size.height
+            == theme.layout.settings_row_height - theme.spacing.extra_small * 0.5));
+        for pair in rows.windows(2) {
+            assert_eq!(
+                pair[1].bounds.origin.y - pair[0].bounds.origin.y,
+                theme.layout.settings_row_height
+            );
+        }
     }
     #[test]
     fn virtualized_family_selection_survives_window_activation_changes() {
